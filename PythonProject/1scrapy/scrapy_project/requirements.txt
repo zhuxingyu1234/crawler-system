@@ -1,0 +1,17 @@
+# Scrapy 核心框架
+scrapy~=2.8.0            # Scrapy 主库（最新 2.8.x 特性兼容）
+scrapy-redis~=0.7.2      # 分布式支持（必须与 Scrapy 2.8 兼容）
+
+# 数据库驱动
+pymongo~=4.3.3           # MongoDB 存储支持
+elasticsearch~=8.5.3     # Elasticsearch 8.x 客户端（注意代码中的 verify_certs=False 配置）
+
+# 网络与安全
+Twisted~=22.10.0          # Scrapy 依赖的异步框架（确保与 Scrapy 2.8 兼容）
+pyOpenSSL~=23.1.1         # HTTPS 处理（settings.py 中的 SSLContextFactory 需要）
+dnspython~=2.3.0          # DNS 解析中间件（middlewares.DnsResolutionMiddleware 依赖）
+
+# 监控系统依赖
+redis~=4.5.5              # Redis 客户端（必须 >=4.x 以支持最新异步语法）
+psutil~=5.9.4             # 系统指标采集（CPU/内存等）
+Flask~=2.2.2              # Web API 服务（monitor_api.py 需）
