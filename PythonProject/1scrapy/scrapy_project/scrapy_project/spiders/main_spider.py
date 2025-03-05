@@ -59,6 +59,7 @@ class DistributedSpider(RedisSpider):
         item['url'] = response.url
         item['status'] = response.status
         item['content_length'] = len(response.body)
+        item['proxy_used'] = response.meta.get('proxy', 'none')
 
         try:
             parsed_url = urlparse(response.url)
@@ -75,10 +76,14 @@ class DistributedSpider(RedisSpider):
                     '//meta[@name="description"]/@content'
                 ).get('')
 
+                # 提取所有链接
+                item['links'] = response.css('a::attr(href)').getall()
+
+                # 提取所有图片链接
+                item['images'] = response.css('img::attr(src)').getall()
+
         except Exception as e:
             item['parse_error'] = f"{type(e).__name__}: {str(e)}"
             self.logger.error(f"解析异常 URL: {response.url} 错误: {str(e)}")
 
         yield item
-
-

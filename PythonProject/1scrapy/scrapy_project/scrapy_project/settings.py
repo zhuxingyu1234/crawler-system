@@ -2,7 +2,7 @@ SPIDER_MODULES = ['scrapy_project.spiders']
 NEWSPIDER_MODULE = 'scrapy_project.spiders'
 
 BOT_NAME = 'scrapy_project'
-ROBOTSTXT_OBEY = False  # 遵守robots协议
+ROBOTSTXT_OBEY = True  # 遵守robots协议
 SCHEDULER = 'scrapy_redis.scheduler.Scheduler'
 SCHEDULER_PERSIST = True
 SCHEDULER_STRATEGY = "priority"  # 可选两种策略
@@ -25,11 +25,13 @@ DOWNLOADER_MIDDLEWARES = {
     'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware': None,
     'scrapy_project.middlewares.HeaderRotationMiddleware': 400,
     #'scrapy_project.middlewares.ProxyMiddleware': 410,  # 被我注释掉了 这个是代理ip的选项
+    'scrapy_project.middlewares.SmartProxyMiddleware': 750,  # 数值高于重试中间件
     'scrapy.downloadermiddlewares.retry.RetryMiddleware': 550,
     'scrapy_project.middlewares.SSLContextAdapterMiddleware': 50,   # 低优先级处理SSL上下文
     'scrapy_project.middlewares.DnsResolutionMiddleware': 300,      # 核心DNS处理层
     'scrapy.downloadermiddlewares.redirect.RedirectMiddleware': 900,  # 保持默认
 }
+PROXY_REFRESH_INTERVAL = 600  # 代理池维护间隔
 DNS_SERVERS = [
     '8.8.8.8',     # Google DNS
     '1.1.1.1',     # Cloudflare DNS

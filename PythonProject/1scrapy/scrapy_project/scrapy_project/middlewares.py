@@ -12,146 +12,71 @@ from scrapy import signals
 
 logger = logging.getLogger(__name__)
 
-class DnsResolutionMiddleware:
-    def __init__(self, dns_servers=None, cache_enabled=True):
-        self.dns_servers = dns_servers or ["8.8.8.8", "1.1.1.1"]
-        self.cache = {}
-        self.cache_enabled = cache_enabled
-        self.record_types = ['A', 'AAAA']
+
+class SmartProxyMiddleware:
+    TEST_URL = "http://httpbin.org/ip"  # 代理验证地址
+    MAX_FAILURES = 3  # 最大连续失败次数
+
+    def __init__(self, redis_host, redis_port):
+        self.redis = RedisProxyPool(host=redis_host, port=redis_port)
+        self.failure_count = defaultdict(int)
 
     @classmethod
     def from_crawler(cls, crawler):
-        settings = crawler.settings
-        instance = cls(
-            dns_servers=settings.getlist('DNS_SERVERS'),
-            cache_enabled=settings.getbool('DNS_CACHE_ENABLED', True)
+        return cls(
+            redis_host=crawler.settings.get('REDIS_HOST', 'localhost'),
+            redis_port=crawler.settings.get('REDIS_PORT', 6379)
         )
-        crawler.signals.connect(instance.spider_closed, signal=signals.spider_closed)
-        return instance
 
-    def spider_closed(self, spider):
-        self.cache.clear()
-        spider.logger.info("DNS缓存已清空")
-
-    async def resolve_domain(self, domain, spider):
-        cached_ip = self.cache.get(domain)
-        if cached_ip and self.cache_enabled:
-            spider.logger.debug(f"[DNS缓存命中] {domain} -> {cached_ip}")
-            return cached_ip
-
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = self.dns_servers
-
-        try:
-            answer = await threads.deferToThread(resolver.resolve, domain, 'A')
-            ip = str(answer[0])
-            record_type = 'A'
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-            try:
-                answer = await threads.deferToThread(resolver.resolve, domain, 'AAAA')
-                ip = str(answer[0])
-                record_type = 'AAAA'
-            except Exception as e:
-                ip = await threads.deferToThread(socket.gethostbyname, domain)
-                record_type = 'System'
-                spider.logger.warning(f"[DNS回退] {domain} 使用系统DNS解析 -> {ip}")
-        spider.logger.debug(f"[DNS解析完成] {domain} {record_type}记录 -> {ip}")
-        if self.cache_enabled:
-            self.cache[domain] = ip
-        return ip
-
-    async def process_request(self, request, spider):
-        parsed = urlparse(request.url)
-        if not parsed.hostname or request.meta.get('dns_bypass'):
-            return
-
-        try:
-            # DNS解析
-            resolved_ip = await self.resolve_domain(parsed.hostname, spider)
-
-            # 构造连接的目标地址，保持原域名但底层使用IP连接
-            port = parsed.port
-            if not port:
-                port = 443 if parsed.scheme == 'https' else 80
-
-            # 核心修改：创建新请求时不替换域名，而是通过meta指定连接目标
-            new_request = request.replace(
-                meta={
-                    **request.meta,
-                    'dns_bypass': True,
-                    'connect_to': (resolved_ip, port)  # 指定底层连接到IP而非域名
-                },
-                # 保留原始域名和协议头
-                headers={
-                    **request.headers,
-                    'Host': parsed.hostname  # 关键！确保Host头正确
-                }
-            )
-
-            return new_request
-        except Exception as e:
-            spider.logger.error(f"请求预处理失败 - URL: {request.url} 错误: {str(e)}")
-            raise IgnoreRequest(f"DNS 解析失败: {str(e)}")
-
-
-class SSLContextAdapterMiddleware:
-    """SSL 上下文适配层"""
-
-    def process_request(self, request, spider):
-        if 'ssl_context' in request.meta:
-            return request.replace(
-                meta={
-                    **request.meta,
-                    'ssl_context': request.meta['ssl_context']
-                }
-            )
-
-
-USER_AGENT_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-]
-
-
-class ProxyMiddleware:
-    def __init__(self):
-        self.proxy_apis = [
-            "https://proxylist.geonode.com/api/proxy-list?limit=10",
-            "https://pubproxy.com/api/proxy",
-            "https://api.proxyscrape.com/v2/?request=getproxies"
-        ]
-
-    def process_request(self, request, spider):
+    def fetch_new_proxies(self, spider):
+        """定时补充新代理"""
+        # 保持原有代理获取逻辑
         for api in self.proxy_apis:
             try:
                 resp = requests.get(api, timeout=8)
-                proxy = random.choice(resp.json()['data'])
-                request.meta['proxy'] = f"http://{proxy['ip']}:{proxy['port']}"
-                spider.logger.debug(f"代理设置成功: {proxy['ip']}:{proxy['port']}")
-                return
+                for proxy in resp.json().get('data', []):
+                    proxy_str = f"{proxy['protocol']}://{proxy['ip']}:{proxy['port']}"
+                    # 验证有效性并入库
+                    if self.validate_proxy(proxy_str):
+                        self.redis.add_proxy(proxy_str)
             except Exception as e:
-                spider.logger.warn(f"代理获取失败: {api} -> {str(e)}")
+                spider.logger.warning(f"代理源 {api} 获取失败: {str(e)}")
 
+    def validate_proxy(self, proxy):
+        """验证代理有效性"""
+        try:
+            resp = requests.get(
+                self.TEST_URL,
+                proxies={"http": proxy, "https": proxy},
+                timeout=5
+            )
+            return resp.status_code == 200
+        except:
+            return False
 
-class RandomUserAgentMiddleware:
     def process_request(self, request, spider):
-        ua = random.choice(USER_AGENT_LIST)
-        request.headers['User-Agent'] = ua
-        request.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        request.headers['Accept-Language'] = 'en-US,en;q=0.5'
+        if not self.redis.conn.zcard(self.redis.proxy_key):
+            spider.logger.warning("代理池为空，触发动态补充")
+            self.fetch_new_proxies(spider)
 
+        if proxy := self.redis.get_random_proxy():
+            spider.logger.debug(f"使用代理: {proxy} | 剩余代理数: {self.redis.conn.zcount(...)}")
+            request.meta['proxy'] = proxy
+            request.meta['download_timeout'] = 10  # 代理特有超时
+        else:
+            raise IgnoreRequest("无可用代理")
 
-class HeaderRotationMiddleware:
-    def process_request(self, request, spider):
-        request.headers.update({
-            'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Upgrade-Insecure-Requests': '1'
-        })
-        # 追加设备指纹
-        request.cookies['device_fp'] = self.generate_device_fingerprint()
+    def process_exception(self, request, exception, spider):
+        """代理失效处理"""
+        proxy = request.meta.get('proxy')
+        if proxy:
+            self.failure_count[proxy] += 1
+            if self.failure_count[proxy] >= self.MAX_FAILURES:
+                spider.logger.error(f"代理永久失效: {proxy}")
+                self.redis.remove_dead_proxy(proxy)
+                del self.failure_count[proxy]
+            else:
+                self.redis.decrease_score(proxy)
+                spider.logger.warning(f"代理降级: {proxy} | 当前失败次数: {self.failure_count[proxy]}")
+        return request.replace(meta=request.meta)  # 重新调度请求
 
-    @staticmethod
-    def generate_device_fingerprint():
-        import uuid
-        return str(uuid.uuid4()).replace('-', '')
